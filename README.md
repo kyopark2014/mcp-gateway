@@ -1,2 +1,534 @@
-# mcp-gateway
-It shows how to deploy MCP server using AgentCore Gateway
+# MCP Gateway
+
+여기에서는 MCP Gateway를 이용해 MCP 서버를 구현하고 관리하는 방법에 대해 설명합니다. 전체적인 architecture는 아래와 같습니다. 사용자가 [streamlit](https://streamlit.io/)으로 구현된 생성형 AI application을 통해 질문을 입력하면, [LangGraph](https://langchain-ai.github.io/langgraph/) 또는 [Strands](https://strandsagents.com/latest/documentation/docs/) agent가 mutli step reasoning을 통해, Kubernetes로 된 중요한 workload를 조회하거나 관리할 수 있고, 사내의 중요한 데이터를 RAG를 이용해 활용할 수 있습니다. 여기에서는 Knowledge base를 조회하는 [kb-retriever](./runtime/kb-retriever/mcp_retrieve.py)와 AWS 인프라를 관리할 수 있는 [use-aws](./runtime/use-aws/use_aws.py)를 MCP tool로 제공하며, 이 tool들은 AgentCore에 runtime 또는 AgentCore Gateway로 배포됩니다.
+
+<img width="800" alt="image" src="https://github.com/user-attachments/assets/62e33c60-543f-42bf-9962-33daf13c4c00" />
+
+## MCP tool의 구현
+
+### AWS 인프라 관리: use-aws
+
+[mcp_server_use_aws.py](https://github.com/kyopark2014/mcp-tools/blob/main/runtime/use-aws/mcp_server_use_aws.py)에서는 아래와 같이 use_aws tool을 등록합니다. use_aws tool은 agent가 전달하는 service_name, operation_name, parameters를 받아서 실행하고 결과를 리턴합니다. service_name은 s3, ec2와 같은 서비스 명이며, operation_name은 list_buckets와 같은 AWS CLI 명령어 입니다. 또한, parameters는 이 명령어를 수행하는데 필요한 값입니다. 
+
+```python
+import use_aws as aws_utils
+
+@mcp.tool()
+def use_aws(service_name, operation_name, parameters, region, label, profile_name) -> Dict[str, Any]:
+    console = aws_utils.create()
+    available_operations = get_available_operations(service_name)
+
+    client = get_boto3_client(service_name, region, profile_name)
+    operation_method = getattr(client, operation_name)
+
+    response = operation_method(**parameters)
+    for key, value in response.items():
+        if isinstance(value, StreamingBody):
+            content = value.read()
+            try:
+                response[key] = json.loads(content.decode("utf-8"))
+            except json.JSONDecodeError:
+                response[key] = content.decode("utf-8")
+    return {
+        "status": "success",
+        "content": [{"text": f"Success: {str(response)}"}],
+    }
+```
+
+[use-aws](https://github.com/kyopark2014/mcp-tools/blob/main/runtime/use-aws/use_aws.py)은 [use_aws.py](https://github.com/strands-agents/tools/blob/main/src/strands_tools/use_aws.py)의 MCP 버전입니다. 
+
+### RAG의 활용: kb-retriever
+
+[kb-retriever](https://github.com/kyopark2014/mcp-tools/blob/main/runtime/kb-retriever/mcp_retrieve.py)를 이용해 완전관리형 RAG 서비스인 Knowledge base의 정보를 조회할 수 있습니다.[mcp_server_retrieve.py](./runtime/kb-retriever/mcp_server_retrieve.py)에서는 agent가 전달하는 keyword를 이용해 mcp_retrieve의 retrieve를 호출합니다. 
+
+```python
+@mcp.tool()
+def retrieve(keyword: str) -> str:
+    return mcp_retrieve.retrieve(keyword)    
+```
+
+[kb-retriever](https://github.com/kyopark2014/mcp-tools/blob/main/runtime/kb-retriever/mcp_retrieve.py)는 아래와 같이 bedrock-agent-runtime를 이용하여 Knowledge Base를 조회합니다. 이때, number_of_results의 결과를 얻은 후에 content와 reference 정보를 추출하여 활용합니다.
+
+```python
+bedrock_agent_runtime_client = boto3.client("bedrock-agent-runtime", region_name=bedrock_region)
+response = bedrock_agent_runtime_client.retrieve(
+    retrievalQuery={"text": query},
+    knowledgeBaseId=knowledge_base_id,
+        retrievalConfiguration={
+            "vectorSearchConfiguration": {"numberOfResults": number_of_results},
+        },
+    )
+retrieval_results = response.get("retrievalResults", [])
+json_docs = []
+for result in retrieval_results:
+    text = url = name = None
+    if "content" in result:
+        content = result["content"]
+        if "text" in content:
+            text = content["text"]
+    if "location" in result:
+        location = result["location"]
+        if "s3Location" in location:
+            uri = location["s3Location"]["uri"] if location["s3Location"]["uri"] is not None else ""            
+            name = uri.split("/")[-1]
+            url = uri # TODO: add path and doc_prefix            
+        elif "webLocation" in location:
+            url = location["webLocation"]["url"] if location["webLocation"]["url"] is not None else ""
+            name = "WEB"
+    json_docs.append({
+        "contents": text,              
+        "reference": {
+            "url": url,                   
+            "title": name,
+            "from": "RAG"
+        }
+    })
+```
+
+## AgentCore Runtime
+
+AgentCore Runtime을 이용하면, container로 동작하는 Streamable HTTP 방식의 MCP 서버를 생성하여 활용할 수 있습니다.
+
+### Runtime 배포 준비
+
+AgentCore로 배포하기 위해서는 MCP 설정시 [mcp_server_retrieve.py](./runtime/kb-retriever/mcp_server_retrieve.py)와 같이 host를 "0.0.0.0"으로 설정하고 외부로는 [Dockerfile](./runtime/kb-retriever/Dockerfile)와 같이 8000 포트를 expose 합니다.
+
+```python
+mcp = FastMCP(
+    name = "mcp-retrieve",
+    instructions=(
+        "You are a helpful assistant. "
+        "You retrieve documents in RAG."
+    ),
+    host="0.0.0.0",
+    stateless_http=True
+)
+```
+
+AgentCore의 runtime으로 MCP를 배포한 후에 활용할 때에는 bearer token을 이용해 인증을 수행합니다. bearer token은 Cognito와 같은 서비스를 통해 생성할 수 있습니다. 아래와 같이 Cognito에 정의한 username/password를 이용해 access token를 생성합니다.
+
+```python
+client = boto3.client('cognito-idp', region_name=region)
+response = client.initiate_auth(
+    ClientId=client_id,
+    AuthFlow='USER_PASSWORD_AUTH',
+    AuthParameters={
+        'USERNAME': username,
+        'PASSWORD': password
+    }
+)
+auth_result = response['AuthenticationResult']
+access_token = auth_result['AccessToken']
+```
+
+AgentCore에 MCP runtime을 배포하면 agent_arn을 얻을 수 있습니다. 이 값은 AgentCore에서 생성할 때 알 수 있으며, 아래와 같이 agent_runtime_name을 가지고 검색할 수도 있습니다.
+
+```python
+client = boto3.client('bedrock-agentcore-control', region_name='us-west-2')
+response = client.list_agent_runtimes()
+agentRuntimes = response['agentRuntimes']
+for agentRuntime in agentRuntimes:
+    if agentRuntime["agentRuntimeName"] == agent_runtime_name:
+        return agentRuntime["agentRuntimeArn"]
+```    
+
+Agent의 arn을 url encoding해서 아래와 같이 mcp_url을 생성합니다. 이때 header의 Authorization에 Cognito를 이용해 생성한 bearer token을 입력합니다.
+
+```python
+encoded_arn = agent_arn.replace(':', '%3A').replace('/', '%2F')    
+mcp_url = f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
+headers = {
+    "Authorization": f"Bearer {bearer_token}",
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream"
+}
+```
+
+이제 mcp_url, headers는 아래와 같이 MCP server의 설정 정보로 활용됩니다.
+
+```python
+"mcpServers": {
+    "kb-retriever": {
+        "type": "streamable_http",
+        "url": f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT",
+        "headers": {
+            "Authorization": f"Bearer {bearer_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+    }
+}
+```
+
+## AgentCore Gateway
+
+AgentCore의 Gateway를 이용하면 Lambda로 Streamable HTTP 방식의 MCP 서버를 만들어 편리하게 이용할 수 있습니다. 
+
+### AgentCore Gateway의 Role 생성
+
+[create_gateway_role.py](./gateway/kb-retriever/create_gateway_role.py)를 이용해 아래와 같이 AgentCore Gateway를 위한 Role을 배포할 수 있습니다.
+
+```text
+python create_gateway_role.py
+```
+
+이때 동작은 Policy와 Role을 순차적으로 생성하고 config.json에 관련된 정보를 업데이트하는 과정을 수행합니다. Policy에는 Lambda, AgentCore, Secret, Cognito, ECR, CloudWatch에 대한 권한을 포함하여야 합니다. 상세한 권한은 [create_gateway_role.py](./gateway/kb-retriever/create_gateway_role.py)을 참조합니다. 
+
+Policy 생성의 상세 코드는 아래와 같습니다. 
+
+```python
+iam_client = boto3.client('iam')
+response = iam_client.create_policy(
+    PolicyName=policy_name,
+    PolicyDocument=json.dumps(policy_document),
+    Description=policy_description
+)
+return response['Policy']['Arn']
+```
+
+생성된 policy로 아래와 같이 role을 생성합니다.
+
+```python
+iam_client = boto3.client('iam')
+response = iam_client.create_role(
+    RoleName=role_name,
+    AssumeRolePolicyDocument=json.dumps(trust_policy),
+    Description="Role for Bedrock AgentCore MCP access"
+)
+iam_client.attach_role_policy(
+    RoleName=role_name,
+    PolicyArn=policy_arn
+)
+role_arn = response['Role']['Arn']
+```
+
+
+### AgentCore Gateway를 이용해 MCP 서버 배포하기
+
+#### AgentCore Gateway 생성
+
+[create_gateway_tool.py](./gateway/kb-retriever/create_gateway_tool.py)를 이용해 MCP server인 target을 AgentCore Gateway에 배포할 수 있습니다.
+
+```python
+python create_gateway_tool.py
+```
+
+Gateway에 배포를 위해서는 bearer token이 필요합니다. 이 token은 먼저 secret에 이미 저장된 값을 먼저 쓰고, 403같은 에러가 발생하면 Cognito를 접속해서 업데이트 합니다. 여기서는 편의상 secret_name으로 아래와 같이 project 이름을 이용하므로, gateway의 모든 target은 같은 secret을 이용합니다. 
+
+```python
+secret_name = f'{projectName.lower()}/credentials'
+
+session = boto3.Session()
+client = session.client('secretsmanager', region_name=region)
+response = client.get_secret_value(SecretId=secret_name)
+bearer_token_raw = response['SecretString']        
+token_data = json.loads(bearer_token_raw)  
+bearer_token = token_data['bearer_token']
+```
+
+인증에 필요한 client_id는 생성할때 config.json에 저장했다가 사용하거나 아래와 같이 client_name을 이용해 검색해서 사용할 수 있습니다. 
+
+```python
+gateway_client = boto3.client('bedrock-agentcore-control', region_name=region)
+if not client_id:
+    response = cognito_client.list_user_pool_clients(UserPoolId=user_pool_id)
+    for client in response['UserPoolClients']:
+        if client['ClientName'] == client_name:
+            client_id = client['ClientId']
+            cognito_config['client_id'] = client_id     
+            break
+```
+
+AgentCore Gateway의 생성을 위해 미리 생성한 client_id, role을 활용합니다. 생성후에 Gateway ID와 URL은 config.json에 저장해 활용합니다.
+
+```python
+client_id = cognito_config.get('client_id')
+agentcore_gateway_iam_role = config['agentcore_gateway_iam_role']
+auth_config = {
+    "customJWTAuthorizer": { 
+        "allowedClients": [client_id],  
+        "discoveryUrl": cognito_discovery_url
+    }
+}
+response = gateway_client.create_gateway(
+    name=gateway_name,
+    roleArn = agentcore_gateway_iam_role,
+    protocolType='MCP',
+    authorizerType='CUSTOM_JWT',
+    authorizerConfiguration=auth_config, 
+    description=f'AgentCore Gateway for {projectName}'
+)
+gateway_id = response["gatewayId"]
+gateway_url = response["gatewayUrl"]
+```
+
+AgentCore Gateway에 접속하기 위한 경로는 아래와 같이 Gateway의 ID와 region 정보를 이용해 얻을 수도 있습니다. 
+
+```python
+gateway_url = f'https://{gateway_id}.gateway.bedrock-agentcore.{region}.amazonaws.com/mcp'
+```
+
+#### Lambda의 생성
+
+Gateway에서 MCP 서버의 동작은 lambda를 활용합니다. Lambda를 배포하기 위하여 아래와 같이 Lambda 폴더의 code들을 압축을 합니다. 이후 아래와 같이 기생성한 lambda role과 zip 파일의 코드를 이용해 lambda를 생성합니다. 
+
+```python
+os.makedirs(lambda_function_path)
+create_dummpy_lambda_function(lambda_function_path)
+
+with zipfile.ZipFile(lambda_function_zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:     
+    for root, dirs, files in os.walk(lambda_dir):
+        for file in files:
+            if file == 'lambda_function.zip':
+                continue
+            file_path = os.path.join(root, file)
+            arcname = os.path.relpath(file_path, lambda_dir)
+            zip_file.write(file_path, arcname)
+
+lambda_client = boto3.client('lambda', region_name=region)
+response = lambda_client.create_function(
+    FunctionName=lambda_function_name,
+    Runtime='python3.13',
+    Handler='lambda_function.lambda_handler',
+    Role=lambda_function_role,
+    Description=f'Lambda function for {lambda_function_name}',
+    Timeout=60,
+    Code={
+        'ZipFile': open(lambda_function_zip_path, 'rb').read()
+    }
+)
+lambda_function_arn = response['FunctionArn']
+```
+
+[lambda_function.py](./gateway/kb-retriever/lambda-kb-retriever-for-mcp/lambda_function.py)와 같이 lambda_handler은 context를 파싱하여 tool 정보와 입력 변수를 추출합니다. 이때 아래와 같이 사용하려는 tool name에 맵핑이 될 때 관련된 함수를 호출합니다. 
+
+```python
+def lambda_handler(event, context):
+    toolName = context.client_context.custom['bedrockAgentCoreToolName']
+    
+    delimiter = "___"
+    if delimiter in toolName:
+        toolName = toolName[toolName.index(delimiter) + len(delimiter):]
+
+    keyword = event.get('keyword')
+    if toolName == 'retrieve':
+        result = retrieve(keyword)
+        return {
+            'statusCode': 200, 
+            'body': result
+        }
+```
+
+이때 tool의 함수의 예는 아래와 같습니다. 아래와 같이 bedrock_agent_runtime_client의 retrieve를 이용해 관련된 문서를 찾은 후에 json 포맷으로 리턴합니다.
+
+```python
+knowledge_base_id = "1CMBJP5NME"
+number_of_results = 5
+
+bedrock_agent_runtime_client = boto3.client("bedrock-agent-runtime")
+def retrieve(query: str) -> str:
+    response = bedrock_agent_runtime_client.retrieve(
+        retrievalQuery={"text": query},
+        knowledgeBaseId=knowledge_base_id,
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {"numberOfResults": number_of_results},
+            },
+        )    
+    retrieval_results = response.get("retrievalResults", [])
+    json_docs = []
+    for result in retrieval_results:
+        text = url = name = None
+        if "content" in result:
+            content = result["content"]
+            if "text" in content:
+                text = content["text"]
+
+        if "location" in result:
+            location = result["location"]
+            if "s3Location" in location:
+                uri = location["s3Location"]["uri"] if location["s3Location"]["uri"] is not None else ""                
+                name = uri.split("/")[-1]                
+            elif "webLocation" in location:
+                url = location["webLocation"]["url"] if location["webLocation"]["url"] is not None else ""
+                name = "WEB"
+        json_docs.append({
+            "contents": text,              
+            "reference": {
+                "url": url,                   
+                "title": name,
+                "from": "RAG"
+            }
+        })
+    return json.dumps(json_docs, ensure_ascii=False)
+```
+
+### Tool Spec
+
+Agent가 Gateway에 tool에 대한 정보를 요청하면 tool spec의 값을 아래와 같이 리턴합니다. 
+
+#### use-aws의 설정
+
+AWS CLI를 이용해 AWS 인프라를 생성 및 관리하는 tool인 use-aws를 위해 아래와 같이 Tool Spec을 정의할 수 있습니다.
+
+```java
+{
+    "name": "use_aws",
+    "description": "Make a boto3 client call with the specified service, operation, and parameters. Boto3 operations are snake_case.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "service_name": {
+                "type": "string",
+                "description": "The name of the AWS service"
+            },
+            "operation_name": {
+                "type": "string",
+                "description": "The name of the operation to perform"
+            },
+            "parameters": {
+                "type": "object",
+                "description": "The parameters for the operation"
+            },
+            "region": {
+                "type": "string",
+                "description": "Region name for calling the operation on AWS boto3"
+            },
+            "label": {
+                "type": "string",
+                "description": "Label of AWS API operations human readable explanation. This is useful for communicating with human."
+            },
+            "profile_name": {
+                "type": "string",
+                "description": "Optional: AWS profile name to use from ~/.aws/credentials. Defaults to default profile if not specified."
+            }
+        },
+        "required": [
+            "region",
+            "service_name",
+            "operation_name",
+            "parameters",
+            "label"
+        ]
+    }
+}
+```
+
+#### kb-retirever의 설정
+
+kb-retirever는 Knowledge Base를 이용하여 검색을 수행합니다. 따라서 아래와 같이 검색어를 위한 string 형태의 keyword가 필요합니다. Tool 선택에 필요한 조건은 description에 기술합니다. 
+
+[tool_spec.json](./gateway/kb-retriever/tool_spec.json)에 사용할 tool에 대한 Spec을 업데이트 합니다. kb-retriever의 경우에 keyword를 검색하므로 아래와 같이 설정합니다.
+
+```java
+{
+    "name": "retrieve",
+    "description": "keyword to retrieve the knowledge base",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "keyword": {
+                "type": "string"
+            }
+        },
+        "required": ["keyword"]
+    }
+}
+```
+
+### Target의 생성
+
+아래와 같이 "tool_spec.json"을 읽어서 toolSchema를 정의합니다. 
+
+```python
+TOOL_SPEC = json.load(open(os.path.join(script_dir, "tool_spec.json")))     
+lambda_target_config = {
+    "mcp": {
+        "lambda": {
+            "lambdaArn": lambda_function_arn, 
+            "toolSchema": {
+                "inlinePayload": [TOOL_SPEC]
+            }
+        }
+    }
+}
+```
+
+이후 아래와 같이 target을 생성합니다.
+
+```python
+credential_config = [ 
+    {
+        "credentialProviderType" : "GATEWAY_IAM_ROLE"
+    }
+]
+response = gateway_client.create_gateway_target(
+    gatewayIdentifier=gateway_id,
+    name=targetname,
+    description=f'{targetname} for {projectName}',
+    targetConfiguration=lambda_target_config,
+    credentialProviderConfigurations=credential_config)
+target_id = response["targetId"]
+```
+
+
+### 배포 방법
+
+여기에서는 Role 및 Tool을 배포하는 2가지의 python 파일을 이용하여 Runtime Gateway에 배포를 수행합니다. [create_gateway_role.py](./gateway/kb-retriever/create_gateway_role.py)와 같이 gateway를 위한 IAM role을 생성합니다. 
+
+```text
+python create_gateway_role.py
+```
+
+[create_gateway_tool.py](./gateway/kb-retriever/create_gateway_tool.py)와 같이 gateway에서 실행할 lambda에 대한 role을 생성하고, target을 배포합니다. 이때 기존 lambda가 없는 경우에 새로 생성합니다. 
+
+```text
+python create_gateway_tool.py
+```
+
+이때, use-aws와 같은 tool은 [lambda folder](./gateway/use-aws/lambda-use-aws-for-mcp)에 use-aws를 위한 colorama, rich, typing_extensions를 설치하여야 합니다. 이와 같은 패키지들은 아래와 같은 방법으로 folder에 설치합니다.
+
+```text
+pip install rich --target ./lambda-kb-retriever-for-mcp
+```
+
+이제 아래와 같이 [create_gateway_tool.py](./gateway/kb-retriever/test_mcp_remote.py)을 이용해 MCP 서버에 대한 동작을 테스트 할 수 있습니다.
+
+```text
+python test_mcp_remote.py
+```
+
+
+## 실행 결과
+
+Streamlit app을 아래와 같이 실행합니다. 
+
+```python
+streamlit run application/app.py
+```
+
+이때 아래와 같이 LangGraph와 Strand agent를 선택할 수 있고, use-aws와 kb-retriever를 이용할 수 있습니다. Streamable HTTP 방식 MCP를 배포하기 전에 docker를 선택해서 로컬에서 테스트 할 수 있으며, 다양한 언어 모델을 선택할 수 있습니다.
+
+<img width="343" height="471" alt="image" src="https://github.com/user-attachments/assets/ecbf3325-4b92-459f-a080-9c1ce297e8e3" />
+
+
+왼쪽 메뉴의 MCP Config에서 "use_aws (streamable)"을 선택한 후에 "내 EKS 현황은?"라고 질문하면, 아래와 같이 use-aws tool을 이용하여 EKS의 상황을 조회할 수 있습니다. 
+
+<img width="655" alt="image" src="https://github.com/user-attachments/assets/d4d2548d-0e60-4e57-b390-53a2ee02bd03" />
+
+또한, "kb-retriever (remote)"을 선택한 후에 "보일러 에러 코드?"로 입력하면, Streamable HTTP를 지원하는 knowledge base MCP에 접속하여 관련된 문서를 아래와 같이 가져와서 답변할 수 있습니다.
+
+<img width="655" alt="image" src="https://github.com/user-attachments/assets/e499b049-9f93-4136-a330-0dc679389b6d" />
+
+
+
+
+
+## Reference 
+
+[Hosting MCP Server on Amazon Bedrock AgentCore Runtime](https://github.com/awslabs/amazon-bedrock-agentcore-samples/blob/main/01-tutorials/01-AgentCore-runtime/02-hosting-MCP-server/hosting_mcp_server.ipynb)
+
+[Bedrock AgentCore Starter Toolkit](https://github.com/aws/bedrock-agentcore-starter-toolkit)
+
+[LangChain MCP Adapters](https://github.com/langchain-ai/langchain-mcp-adapters)
+
+[Strands Agents](https://github.com/strands-agents/sdk-python)

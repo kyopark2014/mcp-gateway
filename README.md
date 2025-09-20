@@ -432,9 +432,9 @@ Streamlit app을 아래와 같이 실행합니다.
 streamlit run application/app.py
 ```
 
-이때 아래와 같이 LangGraph와 Strand agent를 선택할 수 있고, use-aws와 kb-retriever를 이용할 수 있습니다. Streamable HTTP 방식 MCP를 배포하기 전에 docker를 선택해서 로컬에서 테스트 할 수 있으며, 다양한 언어 모델을 선택할 수 있습니다.
+아래와 같이 AgentCore Gateway를 선택합니다.
 
-<img width="343" height="471" alt="image" src="https://github.com/user-attachments/assets/ecbf3325-4b92-459f-a080-9c1ce297e8e3" />
+<img width="384" height="350" alt="image" src="https://github.com/user-attachments/assets/9ec6381e-091d-47a4-99eb-93d817277835" />
 
 
 왼쪽 메뉴의 MCP Config에서 "use_aws (streamable)"을 선택한 후에 "내 EKS 현황은?"라고 질문하면, 아래와 같이 use-aws tool을 이용하여 EKS의 상황을 조회할 수 있습니다. 

@@ -20,7 +20,7 @@ config_path = os.path.join(script_dir, "config.json")
 config = utils.load_config()
 print(f"config: {config}")
 
-region = config["region"] if "region" in config else "us-west-2"
+bedrock_region = config["region"] if "region" in config else "us-west-2"
 projectName = config["projectName"] if "projectName" in config else "mcp"
 workingDir = os.path.dirname(os.path.abspath(__file__))
 logger.info(f"workingDir: {workingDir}")
@@ -28,7 +28,7 @@ logger.info(f"workingDir: {workingDir}")
 def get_bearer_token(secret_name):
     try:
         session = boto3.Session()
-        client = session.client('secretsmanager', region_name=region)
+        client = session.client('secretsmanager', region_name=bedrock_region)
         response = client.get_secret_value(SecretId=secret_name)
         bearer_token_raw = response['SecretString']
         
@@ -50,7 +50,7 @@ bearer_token = ""
 def get_bearer_token_from_secret_manager(secret_name):
     try:
         session = boto3.Session()
-        client = session.client('secretsmanager', region_name=region)
+        client = session.client('secretsmanager', region_name=bedrock_region)
         response = client.get_secret_value(SecretId=secret_name)
         bearer_token_raw = response['SecretString']
         
@@ -74,7 +74,7 @@ def get_cognito_config(cognito_config):
         print(f"No user pool name found in config, using default user pool name: {user_pool_name}")
         cognito_config.setdefault('user_pool_name', user_pool_name)
 
-        cognito_client = boto3.client('cognito-idp', region_name=region)
+        cognito_client = boto3.client('cognito-idp', region_name=bedrock_region)
         response = cognito_client.list_user_pools(MaxResults=60)
         for pool in response['UserPools']:
             if pool['Name'] == user_pool_name:
@@ -129,7 +129,7 @@ def retrieve_bearer_token(secret_name):
 
     # verify bearer token
     try:
-        client = boto3.client('cognito-idp', region_name=region)
+        client = boto3.client('cognito-idp', region_name=bedrock_region)
         response = client.get_user(
             AccessToken=bearer_token
         )
@@ -158,7 +158,7 @@ def retrieve_bearer_token(secret_name):
 def save_bearer_token(secret_name, bearer_token):
     try:        
         session = boto3.Session()
-        client = session.client('secretsmanager', region_name=region)
+        client = session.client('secretsmanager', region_name=bedrock_region)
         
         # Create secret value with bearer_key 
         secret_value = {
@@ -195,13 +195,12 @@ def create_cognito_bearer_token(config):
     """Get a fresh bearer token from Cognito"""
     try:
         cognito_config = config['cognito']
-        region = cognito_config['region']
         client_id = cognito_config['client_id']
         username = cognito_config['test_username']
         password = cognito_config['test_password']
         
         # Create Cognito client
-        client = boto3.client('cognito-idp', region_name=region)
+        client = boto3.client('cognito-idp', region_name=bedrock_region)
         
         # Authenticate and get tokens
         response = client.initiate_auth(
@@ -230,7 +229,7 @@ def get_agent_runtime_arn(mcp_type: str):
     #logger.info(f"mcp_type: {mcp_type}")
     agent_runtime_name = f"{projectName.lower()}_{mcp_type.replace('-', '_')}"
     logger.info(f"agent_runtime_name: {agent_runtime_name}")
-    client = boto3.client('bedrock-agentcore-control', region_name=region)
+    client = boto3.client('bedrock-agentcore-control', region_name=bedrock_region)
     response = client.list_agent_runtimes(
         maxResults=100
     )
@@ -244,7 +243,7 @@ def get_agent_runtime_arn(mcp_type: str):
     return None
 
 def get_gateway_url():
-    gateway_client = boto3.client('bedrock-agentcore-control', region_name=region)
+    gateway_client = boto3.client('bedrock-agentcore-control', region_name=bedrock_region)
     response = gateway_client.list_gateways(maxResults=60)
     gateway_name = config['projectName']
     for gateway in response['items']:
@@ -253,7 +252,7 @@ def get_gateway_url():
             gateway_id = gateway.get('gatewayId')
             config['gateway_id'] = gateway_id
             break
-    gateway_url = f'https://{gateway_id}.gateway.bedrock-agentcore.{region}.amazonaws.com/mcp'
+    gateway_url = f'https://{gateway_id}.gateway.bedrock-agentcore.{bedrock_region}.amazonaws.com/mcp'
     logger.info(f"gateway_url: {gateway_url}")
 
     return gateway_url
@@ -263,14 +262,6 @@ def load_config(mcp_type):
 
     if mcp_type == "use_aws (docker)":
         mcp_type = "use_aws_docker"
-    elif mcp_type == "use_aws (runtime)":
-        mcp_type = "use_aws"
-    elif mcp_type == "kb-retriever (docker)":
-        mcp_type = "kb-retriever_docker"
-    elif mcp_type == "kb-retriever (runtime)":        
-        mcp_type = "kb-retriever"
-    elif mcp_type == "kb-retriever (runtime)":        
-        mcp_type = "kb-retriever"
     elif mcp_type == "agentcore gateway":
         mcp_type = "agentcore gateway"
     
@@ -282,102 +273,6 @@ def load_config(mcp_type):
                     "args": [
                         f"{workingDir}/mcp_server_basic.py"
                     ]
-                }
-            }
-        }
-    elif mcp_type == "use_aws_docker":
-        return {
-            "mcpServers": {
-                "kb-retriever": {
-                    "type": "streamable_http",
-                    "url": "http://127.0.0.1:8000/mcp",
-                    "headers": {
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream"
-                    }
-                }
-            }
-        }
-    elif mcp_type == "use_aws":
-        agent_arn = get_agent_runtime_arn(mcp_type)
-        logger.info(f"mcp_type: {mcp_type}, agent_arn: {agent_arn}")
-        encoded_arn = agent_arn.replace(':', '%3A').replace('/', '%2F')
-
-        secret_name = config['secret_name']
-        bearer_token = get_bearer_token(secret_name)
-        logger.info(f"Bearer token from secret manager: {bearer_token[:100] if bearer_token else 'None'}...")
-
-        if not bearer_token:    
-            # Try to get fresh bearer token from Cognito
-            print("No bearer token found in secret manager, getting fresh bearer token from Cognito...")
-            bearer_token = create_cognito_bearer_token(config)
-            print(f"Bearer token from cognito: {bearer_token[:100] if bearer_token else 'None'}...")
-            
-            if bearer_token:
-                secret_name = config['secret_name']
-                save_bearer_token(secret_name, bearer_token)
-            else:
-                print("Failed to get bearer token from Cognito. Exiting.")
-                return {}
-
-        return {
-            "mcpServers": {
-                "kb-retriever": {
-                    "type": "streamable_http",
-                    "url": f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT",
-                    "headers": {
-                        "Authorization": f"Bearer {bearer_token}",
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream"
-                    }
-                }
-            }
-        }
-    elif mcp_type == "kb-retriever_docker":
-        return {
-            "mcpServers": {
-                "kb-retriever": {
-                    "type": "streamable_http",
-                    "url": "http://127.0.0.1:8000/mcp",
-                    "headers": {
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream"
-                    }
-                }
-            }
-        }
-    elif mcp_type == "kb-retriever":
-        agent_arn = get_agent_runtime_arn(mcp_type)
-        logger.info(f"mcp_type: {mcp_type}, agent_arn: {agent_arn}")
-        encoded_arn = agent_arn.replace(':', '%3A').replace('/', '%2F')
-
-        secret_name = config['secret_name']
-        bearer_token = get_bearer_token(secret_name)
-        logger.info(f"Bearer token from secret manager: {bearer_token[:100] if bearer_token else 'None'}...")
-
-        if not bearer_token:    
-            # Try to get fresh bearer token from Cognito
-            print("No bearer token found in secret manager, getting fresh bearer token from Cognito...")
-            bearer_token = create_cognito_bearer_token(config)
-            print(f"Bearer token from cognito: {bearer_token[:100] if bearer_token else 'None'}...")
-            
-            if bearer_token:
-                secret_name = config['secret_name']
-                save_bearer_token(secret_name, bearer_token)
-            else:
-                print("Failed to get bearer token from Cognito. Exiting.")
-                return {}
-
-        return {
-            "mcpServers": {
-                "kb-retriever": {
-                    "type": "streamable_http",
-                    "url": f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT",
-                    "headers": {
-                        "Authorization": f"Bearer {bearer_token}",
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream"
-                    }
                 }
             }
         }

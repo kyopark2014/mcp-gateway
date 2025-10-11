@@ -76,7 +76,7 @@ with st.sidebar:
 
         # Change radio to checkbox
         mcp_options = [
-            "basic", "use_aws (docker)", "use_aws (runtime)", "kb-retriever (docker)", "kb-retriever (runtime)", "agentcore gateway", "사용자 설정"
+            "basic", "agentcore gateway", "사용자 설정"
         ]
         mcp_selections = {}
         default_selections = ["basic", "agentcore gateway"]

@@ -8,7 +8,7 @@
 
 ### AWS 인프라 관리: use-aws
 
-MCP client가 AgentCore의 gateway로 MCP capability에 대한 discovery 요청하면, use-aws에 대한 [tool_spec.json](./gateway/use-aws/tool_spec.json)을 전달합니다. Agent가 description을 보고 use-aws를 선택하면, 아래의 inputSchema에 해당하는 parameter 값을 설정하여 gateway로 요청합니다. 
+MCP client가 AgentCore의 gateway로 MCP capability에 대한 discovery 요청하면, use-aws에 대한 [tool_spec.json](./gateway/use-aws/tool_spec.json)을 전달합니다. Agent가 description을 보고 use_aws tool을 선택하면, 아래의 inputSchema에 해당하는 parameter 값을 설정하여 gateway로 요청합니다. 
 
 ```java
 {
@@ -52,24 +52,25 @@ MCP client가 AgentCore의 gateway로 MCP capability에 대한 discovery 요청�
 }
 ```
 
-[use_aws](./gateway/use-aws/lambda-use-aws-for-mcp/lambda_function.py) tool이 선택되어 lambda가 trigger되면, 아래와 같이 event에서 tool, service, operation, parameters, region, label, profile과 같이 전달되고, lambda는 tool 이름이 'use_aws'인 경우에 use_aws 함수를 실행합니다.
+[use_aws](./gateway/use-aws/lambda-use-aws-for-mcp/lambda_function.py) tool이 선택되어 lambda가 trigger되면, 아래와 같이 event에서 tool, service, operation, parameters, region, label, profile과 같은 parameter가 전달되고, lambda는 tool 이름이 'use_aws'인 경우에 use_aws 함수를 실행합니다.
 
 ```python
-toolName = context.client_context.custom['bedrockAgentCoreToolName']
-service_name = event.get('service_name')
-operation_name = event.get('operation_name')
-parameters = event.get('parameters')
-region = event.get('region')
-label = event.get('label')
-profile_name = event.get('profile_name')
-
-if toolName == 'use_aws':
-    body = use_aws(service_name, operation_name, parameters, region, label, profile_name)
-    print(f"body: {body}")
-    return {
-        'statusCode': 200, 
-        'body': json.dumps(body)            
-    }
+def lambda_handler(event, context):
+    toolName = context.client_context.custom['bedrockAgentCoreToolName']
+    service_name = event.get('service_name')
+    operation_name = event.get('operation_name')
+    parameters = event.get('parameters')
+    region = event.get('region')
+    label = event.get('label')
+    profile_name = event.get('profile_name')
+    
+    if toolName == 'use_aws':
+        body = use_aws(service_name, operation_name, parameters, region, label, profile_name)
+        print(f"body: {body}")
+        return {
+            'statusCode': 200, 
+            'body': json.dumps(body)            
+        }
 ```
 
 use_aws 함수는 boto3로 전달받은 operation을 수행하고 결과를 리턴합니다.
@@ -102,50 +103,79 @@ def use_aws(
 
 ### RAG의 활용: kb-retriever
 
-[kb-retriever](./gateway/kb-retriever/lambda-kb-retriever-for-mcp/lambda_function.py)를 이용해 완전관리형 RAG 서비스인 Knowledge base의 정보를 조회할 수 있습니다. [mcp_server_retrieve.py](./gateway/kb-retriever/lambda-kb-retriever-for-mcp/lambda_function.py)에서는 agent가 전달하는 keyword를 이용해 mcp_retrieve의 retrieve를 호출합니다. 
+MCP client가 gateway를 통해 tool 정보를 요청하면, 아래와 같은 [kb-retriever에 대한 tool 정보](./gateway/kb-retriever/tool_spec.json)가 전달됩니다. 이때 description을 보고 retrieve tool이 선택되면, inputSchema의 keyword를 설정하여 kb-retriever를 호출하게 됩니다.
 
-```python
-@mcp.tool()
-def retrieve(keyword: str) -> str:
-    return mcp_retrieve.retrieve(keyword)    
+```java
+{
+    "name": "retrieve",
+    "description": "keyword to retrieve the knowledge base",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "keyword": {
+                "type": "string"
+            }
+        },
+        "required": ["keyword"]
+    }
+}
 ```
 
-[kb-retriever](./gateway/kb-retriever/lambda-kb-retriever-for-mcp/lambda_function.py)는 아래와 같이 bedrock-agent-runtime를 이용하여 Knowledge Base를 조회합니다. 이때, number_of_results의 결과를 얻은 후에 content와 reference 정보를 추출하여 활용합니다.
+[kb-retriever](./gateway/kb-retriever/lambda-kb-retriever-for-mcp/lambda_function.py)에서는 완전관리형 RAG 서비스인 Knowledge base의 정보를 조회합니다. 이를 위해 lambda는 event에서 tool 이름과 paramter인 keyword를 추출하여 retrieve 함수를 호출합니다.
 
 ```python
-bedrock_agent_runtime_client = boto3.client("bedrock-agent-runtime", region_name=bedrock_region)
-response = bedrock_agent_runtime_client.retrieve(
-    retrievalQuery={"text": query},
-    knowledgeBaseId=knowledge_base_id,
-        retrievalConfiguration={
-            "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-        },
-    )
-retrieval_results = response.get("retrievalResults", [])
-json_docs = []
-for result in retrieval_results:
-    text = url = name = None
-    if "content" in result:
-        content = result["content"]
-        if "text" in content:
-            text = content["text"]
-    if "location" in result:
-        location = result["location"]
-        if "s3Location" in location:
-            uri = location["s3Location"]["uri"] if location["s3Location"]["uri"] is not None else ""            
-            name = uri.split("/")[-1]
-            url = uri # TODO: add path and doc_prefix            
-        elif "webLocation" in location:
-            url = location["webLocation"]["url"] if location["webLocation"]["url"] is not None else ""
-            name = "WEB"
-    json_docs.append({
-        "contents": text,              
-        "reference": {
-            "url": url,                   
-            "title": name,
-            "from": "RAG"
+def lambda_handler(event, context):
+    toolName = context.client_context.custom['bedrockAgentCoreToolName']
+    delimiter = "___"
+    if delimiter in toolName:
+        toolName = toolName[toolName.index(delimiter) + len(delimiter):]
+
+    keyword = event.get('keyword')
+    if toolName == 'retrieve':
+        result = retrieve(keyword)
+        return {
+            'statusCode': 200, 
+            'body': result
         }
-    })
+```
+
+[kb-retriever](./gateway/kb-retriever/lambda-kb-retriever-for-mcp/lambda_function.py)의 retrieve 함수는 아래와 같이 knowledge base에서 keyworkd에 대한 vector 검색을 수행하고 결과에서 text, location 정보를 추출하여 리턴합니다.
+
+```python
+def retrieve(query: str) -> str:
+    response = bedrock_agent_runtime_client.retrieve(
+        retrievalQuery={"text": query},
+        knowledgeBaseId=knowledge_base_id,
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {"numberOfResults": number_of_results},
+            },
+        )    
+    retrieval_results = response.get("retrievalResults", [])
+
+    json_docs = []
+    for result in retrieval_results:
+        text = url = name = None
+        if "content" in result:
+            content = result["content"]
+            if "text" in content:
+                text = content["text"]
+        if "location" in result:
+            location = result["location"]
+            if "s3Location" in location:
+                uri = location["s3Location"]["uri"] if location["s3Location"]["uri"] is not None else ""                
+                name = uri.split("/")[-1]                
+            elif "webLocation" in location:
+                url = location["webLocation"]["url"] if location["webLocation"]["url"] is not None else ""
+                name = "WEB"
+        json_docs.append({
+            "contents": text,              
+            "reference": {
+                "url": url,                   
+                "title": name,
+                "from": "RAG"
+            }
+        })
+    return json.dumps(json_docs, ensure_ascii=False)
 ```
 
 

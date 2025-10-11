@@ -289,7 +289,7 @@ AgentCore Gateway에 접속하기 위한 경로는 아래와 같이 Gateway의 I
 gateway_url = f'https://{gateway_id}.gateway.bedrock-agentcore.{region}.amazonaws.com/mcp'
 ```
 
-#### Lambda의 생성
+#### Lambda deployment
 
 Gateway에서 MCP 서버의 동작은 lambda를 활용합니다. Lambda를 배포하기 위하여 아래와 같이 Lambda 폴더의 code들을 압축을 합니다. 이후 아래와 같이 기생성한 lambda role과 zip 파일의 코드를 이용해 lambda를 생성합니다. 
 
@@ -321,160 +321,9 @@ response = lambda_client.create_function(
 lambda_function_arn = response['FunctionArn']
 ```
 
-[lambda_function.py](./gateway/kb-retriever/lambda-kb-retriever-for-mcp/lambda_function.py)와 같이 lambda_handler은 context를 파싱하여 tool 정보와 입력 변수를 추출합니다. 이때 아래와 같이 사용하려는 tool name에 맵핑이 될 때 관련된 함수를 호출합니다. 
-
-```python
-def lambda_handler(event, context):
-    toolName = context.client_context.custom['bedrockAgentCoreToolName']
-    
-    delimiter = "___"
-    if delimiter in toolName:
-        toolName = toolName[toolName.index(delimiter) + len(delimiter):]
-
-    keyword = event.get('keyword')
-    if toolName == 'retrieve':
-        result = retrieve(keyword)
-        return {
-            'statusCode': 200, 
-            'body': result
-        }
-```
-
-이때 tool의 함수의 예는 아래와 같습니다. 아래와 같이 bedrock_agent_runtime_client의 retrieve를 이용해 관련된 문서를 찾은 후에 json 포맷으로 리턴합니다.
-
-```python
-knowledge_base_id = "1CMBJP5NME"
-number_of_results = 5
-
-bedrock_agent_runtime_client = boto3.client("bedrock-agent-runtime")
-def retrieve(query: str) -> str:
-    response = bedrock_agent_runtime_client.retrieve(
-        retrievalQuery={"text": query},
-        knowledgeBaseId=knowledge_base_id,
-            retrievalConfiguration={
-                "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-            },
-        )    
-    retrieval_results = response.get("retrievalResults", [])
-    json_docs = []
-    for result in retrieval_results:
-        text = url = name = None
-        if "content" in result:
-            content = result["content"]
-            if "text" in content:
-                text = content["text"]
-
-        if "location" in result:
-            location = result["location"]
-            if "s3Location" in location:
-                uri = location["s3Location"]["uri"] if location["s3Location"]["uri"] is not None else ""                
-                name = uri.split("/")[-1]                
-            elif "webLocation" in location:
-                url = location["webLocation"]["url"] if location["webLocation"]["url"] is not None else ""
-                name = "WEB"
-        json_docs.append({
-            "contents": text,              
-            "reference": {
-                "url": url,                   
-                "title": name,
-                "from": "RAG"
-            }
-        })
-    return json.dumps(json_docs, ensure_ascii=False)
-```
-
-### Tool Spec
-
-Agent가 Gateway에 tool에 대한 정보를 요청하면 tool spec의 값을 아래와 같이 리턴합니다. 
-
-#### use-aws의 설정
-
-AWS CLI를 이용해 AWS 인프라를 생성 및 관리하는 tool인 use-aws를 위해 아래와 같이 Tool Spec을 정의할 수 있습니다.
-
-```java
-{
-    "name": "use_aws",
-    "description": "Make a boto3 client call with the specified service, operation, and parameters. Boto3 operations are snake_case.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "service_name": {
-                "type": "string",
-                "description": "The name of the AWS service"
-            },
-            "operation_name": {
-                "type": "string",
-                "description": "The name of the operation to perform"
-            },
-            "parameters": {
-                "type": "object",
-                "description": "The parameters for the operation"
-            },
-            "region": {
-                "type": "string",
-                "description": "Region name for calling the operation on AWS boto3"
-            },
-            "label": {
-                "type": "string",
-                "description": "Label of AWS API operations human readable explanation. This is useful for communicating with human."
-            },
-            "profile_name": {
-                "type": "string",
-                "description": "Optional: AWS profile name to use from ~/.aws/credentials. Defaults to default profile if not specified."
-            }
-        },
-        "required": [
-            "region",
-            "service_name",
-            "operation_name",
-            "parameters",
-            "label"
-        ]
-    }
-}
-```
-
-#### kb-retirever의 설정
-
-kb-retirever는 Knowledge Base를 이용하여 검색을 수행합니다. 따라서 아래와 같이 검색어를 위한 string 형태의 keyword가 필요합니다. Tool 선택에 필요한 조건은 description에 기술합니다. 
-
-[tool_spec.json](./gateway/kb-retriever/tool_spec.json)에 사용할 tool에 대한 Spec을 업데이트 합니다. kb-retriever의 경우에 keyword를 검색하므로 아래와 같이 설정합니다.
-
-```java
-{
-    "name": "retrieve",
-    "description": "keyword to retrieve the knowledge base",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "keyword": {
-                "type": "string"
-            }
-        },
-        "required": ["keyword"]
-    }
-}
-```
-
 ### Target의 생성
 
-아래와 같이 "tool_spec.json"을 읽어서 toolSchema를 정의합니다. 
-
-```python
-TOOL_SPEC = json.load(open(os.path.join(script_dir, "tool_spec.json")))     
-lambda_target_config = {
-    "mcp": {
-        "lambda": {
-            "lambdaArn": lambda_function_arn, 
-            "toolSchema": {
-                "inlinePayload": [TOOL_SPEC]
-            }
-        }
-    }
-}
-```
-
-이후 아래와 같이 target을 생성합니다.
+아래와 같이 target을 생성합니다.
 
 ```python
 credential_config = [ 

@@ -8,34 +8,97 @@
 
 ### AWS 인프라 관리: use-aws
 
-[mcp_server_use_aws.py](./gateway/use-aws/lambda-use-aws-for-mcp/lambda_function.py)에서는 아래와 같이 use_aws tool을 등록합니다. use_aws tool은 agent가 전달하는 service_name, operation_name, parameters를 받아서 실행하고 결과를 리턴합니다. service_name은 s3, ec2와 같은 서비스 명이며, operation_name은 list_buckets와 같은 AWS CLI 명령어 입니다. 또한, parameters는 이 명령어를 수행하는데 필요한 값입니다. 
+MCP client가 AgentCore의 gateway로 MCP capability에 대한 discovery 요청하면, use-aws에 대한 [tool_spec.json](./gateway/use-aws/tool_spec.json)을 전달합니다. Agent가 description을 보고 use-aws를 선택하면, 아래의 inputSchema에 해당하는 parameter 값을 설정하여 gateway로 요청합니다. 
+
+```java
+{
+    "name": "use_aws",
+    "description": "Make a boto3 client call with the specified service, operation, and parameters. Boto3 operations are snake_case.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "service_name": {
+                "type": "string",
+                "description": "The name of the AWS service"
+            },
+            "operation_name": {
+                "type": "string",
+                "description": "The name of the operation to perform"
+            },
+            "parameters": {
+                "type": "object",
+                "description": "The parameters for the operation"
+            },
+            "region": {
+                "type": "string",
+                "description": "Region name for calling the operation on AWS boto3"
+            },
+            "label": {
+                "type": "string",
+                "description": "Label of AWS API operations human readable explanation. This is useful for communicating with human."
+            },
+            "profile_name": {
+                "type": "string",
+                "description": "Optional: AWS profile name to use from ~/.aws/credentials. Defaults to default profile if not specified."
+            }
+        },
+        "required": [
+            "service_name",
+            "operation_name",
+            "parameters",
+            "label"
+        ]
+    }
+}
+```
+
+[use_aws](./gateway/use-aws/lambda-use-aws-for-mcp/lambda_function.py) tool이 선택되어 lambda가 trigger되면, 아래와 같이 event에서 tool, service, operation, parameters, region, label, profile과 같이 전달되고, lambda는 tool 이름이 'use_aws'인 경우에 use_aws 함수를 실행합니다.
 
 ```python
-import use_aws as aws_utils
+toolName = context.client_context.custom['bedrockAgentCoreToolName']
+service_name = event.get('service_name')
+operation_name = event.get('operation_name')
+parameters = event.get('parameters')
+region = event.get('region')
+label = event.get('label')
+profile_name = event.get('profile_name')
 
-@mcp.tool()
-def use_aws(service_name, operation_name, parameters, region, label, profile_name) -> Dict[str, Any]:
-    console = aws_utils.create()
-    available_operations = get_available_operations(service_name)
+if toolName == 'use_aws':
+    body = use_aws(service_name, operation_name, parameters, region, label, profile_name)
+    print(f"body: {body}")
+    return {
+        'statusCode': 200, 
+        'body': json.dumps(body)            
+    }
+```
 
+use_aws 함수는 boto3로 전달받은 operation을 수행하고 결과를 리턴합니다.
+
+```python
+def get_boto3_client(service_name: str, region_name: str, profile_name: Optional[str] = None) -> Any:
+    session = boto3.Session(profile_name=profile_name)
+    return session.client(service_name=service_name, region_name=region_name)
+
+def use_aws(
+    service_name: str,
+    operation_name: str,
+    parameters: Dict[str, Any],
+    region: Optional[str] = None,
+    label: str = "AWS Operation Details",
+    profile_name: Optional[str] = None
+) -> Dict[str, Any]:
     client = get_boto3_client(service_name, region, profile_name)
     operation_method = getattr(client, operation_name)
 
     response = operation_method(**parameters)
-    for key, value in response.items():
-        if isinstance(value, StreamingBody):
-            content = value.read()
-            try:
-                response[key] = json.loads(content.decode("utf-8"))
-            except json.JSONDecodeError:
-                response[key] = content.decode("utf-8")
+    response = handle_streaming_body(response)
+    response = aws_utils.convert_datetime_to_str(response)
+
     return {
         "status": "success",
         "content": [{"text": f"Success: {str(response)}"}],
     }
 ```
-
-[use-aws](./gateway/use-aws/lambda-use-aws-for-mcp/lambda_function.py)은 [use_aws.py](https://github.com/strands-agents/tools/blob/main/src/strands_tools/use_aws.py)의 MCP 버전입니다. 
 
 ### RAG의 활용: kb-retriever
 

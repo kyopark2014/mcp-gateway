@@ -261,6 +261,8 @@ if not client_id:
 AgentCore Gateway의 생성을 위해 미리 생성한 client_id, role을 활용합니다. 생성후에 Gateway ID와 URL은 config.json에 저장해 활용합니다.
 
 ```python
+cognito_discovery_url = f'https://cognito-idp.{region}.amazonaws.com/{user_pool_id}/.well-known/openid-configuration'
+
 client_id = cognito_config.get('client_id')
 agentcore_gateway_iam_role = config['agentcore_gateway_iam_role']
 auth_config = {

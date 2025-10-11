@@ -47,7 +47,7 @@ def retrieve(keyword: str) -> str:
     return mcp_retrieve.retrieve(keyword)    
 ```
 
-[kb-retriever](./runtime/kb-retriever/mcp_retrieve.py)는 아래와 같이 bedrock-agent-runtime를 이용하여 Knowledge Base를 조회합니다. 이때, number_of_results의 결과를 얻은 후에 content와 reference 정보를 추출하여 활용합니다.
+[kb-retriever](./gateway/kb-retriever/mcp_retrieve.py)는 아래와 같이 bedrock-agent-runtime를 이용하여 Knowledge Base를 조회합니다. 이때, number_of_results의 결과를 얻은 후에 content와 reference 정보를 추출하여 활용합니다.
 
 ```python
 bedrock_agent_runtime_client = boto3.client("bedrock-agent-runtime", region_name=bedrock_region)

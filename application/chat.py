@@ -345,7 +345,6 @@ def _build_openai_chat(profile: dict, max_output_tokens: int):
         client=boto3_bedrock,
         model_kwargs={
             "max_tokens": max_output_tokens,
-            "temperature": 0.1,
             "top_p": 0.9,
         },
         region_name=bedrock_region,
@@ -2255,6 +2254,27 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
                                 tool_name = content_item.get('name', '')
                                 logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
                                 add_notification(containers, f"Tool: {tool_name}, Input: {input}")
+                        elif content_item.get('type') == 'function_call':
+                            # OpenAI Responses API: function_call blocks instead of tool_use
+                            call_id = content_item.get('call_id') or content_item.get('id', '')
+                            name = content_item.get('name', '')
+                            if call_id and name:
+                                toolUseId = call_id
+                                tool_name = name
+                                logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
+                                add_notification(containers, f"Tool: {tool_name}, Input: {input}")
+                                tool_info_list[toolUseId] = index
+                                tool_name_list[toolUseId] = tool_name
+
+                            if 'arguments' in content_item and toolUseId:
+                                arguments = content_item.get('arguments', '')
+                                if not isinstance(arguments, str):
+                                    arguments = str(arguments)
+                                tool_input_list[toolUseId] = arguments
+                                input = tool_input_list[toolUseId]
+                                if toolUseId in tool_info_list:
+                                    idx = tool_info_list[toolUseId]
+                                    containers['notification'][idx-1].info(f"Tool: {tool_name}, Input: {input}")
 
                                 tool_info_list[toolUseId] = index                     
                                 tool_name_list[toolUseId] = tool_name     
@@ -2274,6 +2294,41 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
                                 index = tool_info_list[toolUseId]
                                 containers['notification'][index-1].info(f"Tool: {tool_name}, Input: {input}")
                         
+
+            # OpenAI streaming may deliver tool calls via tool_call_chunks
+            tool_call_chunks = getattr(message, "tool_call_chunks", None) or []
+            for tc in tool_call_chunks:
+                tid = tc.get("id") or toolUseId
+                tname = tc.get("name") or tool_name
+                if tid and tname:
+                    toolUseId = tid
+                    tool_name = tname
+                    logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
+                    if toolUseId not in tool_info_list:
+                        add_notification(containers, f"Tool: {tool_name}, Input: ")
+                        tool_info_list[toolUseId] = index
+                        tool_name_list[toolUseId] = tool_name
+                args_delta = tc.get("args")
+                if args_delta is not None and toolUseId:
+                    if toolUseId not in tool_input_list:
+                        tool_input_list[toolUseId] = ""
+                    if isinstance(args_delta, str):
+                        tool_input_list[toolUseId] += args_delta
+                    elif args_delta:
+                        tool_input_list[toolUseId] = str(args_delta)
+                    if toolUseId in tool_info_list:
+                        idx = tool_info_list[toolUseId]
+                        containers['notification'][idx-1].info(
+                            f"Tool: {tool_name}, Input: {tool_input_list[toolUseId]}"
+                        )
+
+            if not tool_call_chunks and getattr(message, "tool_calls", None):
+                for tc in message.tool_calls:
+                    tid = tc.get("id", "")
+                    tname = tc.get("name", "")
+                    targs = tc.get("args", {})
+                    if tid and tname:
+                        add_notification(containers, f"Tool: {tname}, Input: {targs}")
         elif isinstance(output, tuple) and len(output) > 0 and isinstance(output[0], ToolMessage):
             message = output[0]
             logger.info(f"ToolMessage: {message.name}, {message.content}")

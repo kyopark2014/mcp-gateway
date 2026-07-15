@@ -147,6 +147,9 @@ with st.sidebar:
             'Claude 3.5 Haiku', 
             'OpenAI GPT 5.4',
             'OpenAI GPT 5.5',
+            'OpenAI GPT 5.6 Sol',
+            'OpenAI GPT 5.6 Terra',
+            'OpenAI GPT 5.6 Luna',
             'OpenAI OSS 120B',
             'OpenAI OSS 20B'
         ), index=6

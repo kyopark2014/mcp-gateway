@@ -27,7 +27,7 @@ from pydantic.v1 import BaseModel, Field
 from langchain_core.output_parsers import StrOutputParser
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, AIMessageChunk
-from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain.mcp import MCPAdapter
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -2134,10 +2134,16 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
     logger.info(f"server_params: {server_params}")    
 
     try:
-        client = MultiServerMCPClient(server_params)
-        logger.info(f"MCP client created successfully")
-        
-        tools = await client.get_tools()
+        tools = []
+        for server_name, params in server_params.items():
+            try:
+                async with MCPAdapter({"mcpServers": {server_name: params}}) as adapter:
+                    logger.info(f"MCP client created successfully")
+                    _tools = await adapter.list_tools()
+                tools.extend(_tools)
+            except Exception as _mcp_err:
+                logger.error(f"Failed to load MCP server '{server_name}': {_mcp_err}")
+
         logger.info(f"get_tools() returned: {tools}")
         
         if tools is None:
@@ -2171,8 +2177,15 @@ async def run_langgraph_agent(query, mcp_servers, history_mode, containers):
                 
                 # Retry with new bearer token
                 logger.info("Retrying MCP client creation with fresh bearer token...")
-                client = MultiServerMCPClient(server_params)
-                tools = await client.get_tools()
+                tools = []
+                for server_name, params in server_params.items():
+                    try:
+                        async with MCPAdapter({"mcpServers": {server_name: params}}) as adapter:
+                            _tools = await adapter.list_tools()
+                        tools.extend(_tools)
+                    except Exception as _mcp_err:
+                        logger.error(f"Failed to load MCP server '{server_name}': {_mcp_err}")
+
                 
                 if tools is None:
                     logger.error("tools is still None after bearer token refresh")
